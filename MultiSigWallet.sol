@@ -1,202 +1,81 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.3;
+pragma solidity ^0.8.4;
 
-/// @title Multisignature wallet - Allows multiple parties to agree on transactions before execution.
-// Code adopted from https://solidity-by-example.org/app/multi-sig-wallet/ 
 contract MultiSigWallet {
-
-    // events
-    event Deposit(address indexed sender, uint amount, uint balance);
-    event SubmitTransaction(
-        address indexed owner,
-        uint indexed txIndex,
-        address indexed to,
-        uint value,
-        bytes data
-    );
-    event ConfirmTransaction(address indexed owner, uint indexed txIndex);
-    event RevokeConfirmation(address indexed owner, uint indexed txIndex);
-    event ExecuteTransaction(address indexed owner, uint indexed txIndex);
-    
-    // variables
     address[] public owners;
-    mapping(address => bool) public isOwner;
-    uint public numConfirmationsRequired;
+    uint public required;
+    uint public transactionCount;
+    mapping(uint => mapping (address => bool)) public confirmations;
+
     struct Transaction {
-        address to;
+        address recipient;
         uint value;
-        bytes data;
         bool executed;
-        uint numConfirmations;
-    }
-    // mapping from tx index => owner => bool
-    mapping(uint => mapping(address => bool)) public isConfirmed;
-    Transaction[] public transactions;
-    
-
-    // modifiers
-    modifier onlyOwner() {
-        require(isOwner[msg.sender], "not owner");
-        _;
+        bytes data;
     }
 
-    modifier txExists(uint _txIndex) {
-        require(_txIndex < transactions.length, "tx does not exist");
-        _;
+    mapping(uint => Transaction) public transactions;
+
+    constructor(address[] memory _owners, uint _required) {
+        require(_required >= 1);
+        require(required <= _owners.length);
+        require(_owners.length >= 1);
+        owners = _owners;
+        required = _required;
     }
 
-    modifier notExecuted(uint _txIndex) {
-        require(!transactions[_txIndex].executed, "tx already executed");
-        _;
+    function addTransaction(address _recipient, uint _value, bytes memory _data) public returns(uint transactionId) {
+        transactionId = transactionCount;
+        transactions[transactionCount] = Transaction(_recipient, _value, false, _data);
+        transactionCount += 1;
+        return transactionCount - 1;
     }
 
-    modifier notConfirmed(uint _txIndex) {
-        require(!isConfirmed[_txIndex][msg.sender], "tx already confirmed");
-        _;
-    }
-
-    constructor(address[] memory _owners, uint _numConfirmationsRequired) {
-        require(_owners.length > 0, "owners required");
-        require(
-            _numConfirmationsRequired > 0 &&
-                _numConfirmationsRequired <= _owners.length,
-            "invalid number of required confirmations"
-        );
-
-        for (uint i = 0; i < _owners.length; i++) {
-            address owner = _owners[i];
-
-            require(owner != address(0), "invalid owner");
-            require(!isOwner[owner], "owner not unique");
-
-            isOwner[owner] = true;
-            owners.push(owner);
+    function confirmTransaction(uint transactionId) public {
+        require (isOwner(msg.sender) == true);
+        confirmations[transactionId][msg.sender] = true;
+        if (isConfirmed(transactionId)) {
+        executeTransaction(transactionId);
         }
-
-        numConfirmationsRequired = _numConfirmationsRequired;
     }
 
-    /// @dev Fallback function allows to deposit ether.
-    receive() external payable {
-        emit Deposit(msg.sender, msg.value, address(this).balance);
-    }
-    
-    /// @dev Allows an owner to submit and confirm a transaction.
-    /// @param _to Transaction target address.
-    /// @param _value Transaction ether value.
-    /// @param _data Transaction data payload.
-    /// @return txIndex Returns a txIndex.
-    function submitTransaction(
-        address _to,
-        uint _value,
-        bytes memory _data
-    ) public onlyOwner returns (uint txIndex) {
-        txIndex = transactions.length;
-
-        transactions.push(
-            Transaction({
-                to: _to,
-                value: _value,
-                data: _data,
-                executed: false,
-                numConfirmations: 0
-            })
-        );
-        
-        emit SubmitTransaction(msg.sender, txIndex, _to, _value, _data);
+    function getConfirmationsCount(uint transactionId) public view returns(uint numConfirmed) {
+        uint count;
+        for(uint i = 0; i < owners.length; i++) {
+            if(confirmations[transactionId][owners[i]]) {
+                count++;
+            }
+        }
+        return count;
     }
 
-    /// @dev Allows an owner to confirm a transaction.
-    /// @param _txIndex Transaction ID.    
-    function confirmTransaction(uint _txIndex)
-        public
-        onlyOwner
-        txExists(_txIndex)
-        notExecuted(_txIndex)
-        notConfirmed(_txIndex)
-    {
-        Transaction storage transaction = transactions[_txIndex];
-        transaction.numConfirmations += 1;
-        isConfirmed[_txIndex][msg.sender] = true;
-
-        emit ConfirmTransaction(msg.sender, _txIndex);
+    function isOwner(address addr) internal view returns(bool) {
+        for(uint i = 0; i < owners.length; i++) {
+            if(owners[i] == addr) {
+                return true;
+            }
+        }
+        return false;
     }
-    
-    /// @dev Allows anyone to execute a confirmed transaction.
-    /// @param _txIndex Transaction ID.
-    function executeTransaction(uint _txIndex)
-        public
-        onlyOwner
-        txExists(_txIndex)
-        notExecuted(_txIndex)
-    {
-        Transaction storage transaction = transactions[_txIndex];
 
-        require(
-            transaction.numConfirmations >= numConfirmationsRequired,
-            "cannot execute tx"
-        );
+    function submitTransaction(address _recipient, uint _value, bytes memory _data) external {
+        uint id = addTransaction(_recipient, _value, _data);
+        confirmTransaction(id);
+    }
 
+    function isConfirmed(uint transactionId) public view returns(bool) {
+        return getConfirmationsCount(transactionId) >= required;
+    }
+
+    function executeTransaction(uint transactionId) public {
+        require(isConfirmed(transactionId));
+        Transaction storage transaction = transactions[transactionId];
+        (bool s, ) = transaction.recipient.call{ value: transaction.value }(transaction.data);
+        require(s);
         transaction.executed = true;
-
-        (bool success, ) = transaction.to.call{value: transaction.value}(
-            transaction.data
-        );
-        require(success, "tx failed");
-
-        emit ExecuteTransaction(msg.sender, _txIndex);
-    }
-    
-    /// @dev Allows an owner to revoke a confirmation for a transaction.
-    /// @param _txIndex Transaction ID.
-    function revokeConfirmation(uint _txIndex)
-        public
-        onlyOwner
-        txExists(_txIndex)
-        notExecuted(_txIndex)
-    {
-        Transaction storage transaction = transactions[_txIndex];
-
-        require(isConfirmed[_txIndex][msg.sender], "tx not confirmed");
-
-        transaction.numConfirmations -= 1;
-        isConfirmed[_txIndex][msg.sender] = false;
-
-        emit RevokeConfirmation(msg.sender, _txIndex);
     }
 
-    /// @dev Returns list of owners.
-    /// @return owners List of owner addresses.
-    function getOwners() public view returns (address[] memory) {
-        return owners;
-    }
-    
-    /// @dev Returns transaction count.
-    /// @return number of transactions.
-    function getTransactionCount() public view returns (uint) {
-        return transactions.length;
-    }
-    
-    /// @dev Returns transaction by txIndex giving the to,value, data, executed, numConfirmations the transactions deailts
-    function getTransaction(uint _txIndex)
-        public
-        view
-        returns (
-            address to,
-            uint value,
-            bytes memory data,
-            bool executed,
-            uint numConfirmations
-        )
-    {
-        Transaction storage transaction = transactions[_txIndex];
+    receive() payable external {
 
-        return (
-            transaction.to,
-            transaction.value,
-            transaction.data,
-            transaction.executed,
-            transaction.numConfirmations
-        );
     }
 }
